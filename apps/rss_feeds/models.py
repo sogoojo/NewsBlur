@@ -674,6 +674,8 @@ class Feed(models.Model):
         month_count = 0
         if not current_counts:
             current_counts = self.data.story_count_history and json.decode(self.data.story_count_history)
+            if isinstance(current_counts, dict):
+                current_counts = current_counts['months']
         
         if not current_counts:
             current_counts = []
@@ -682,26 +684,28 @@ class Feed(models.Model):
         map_f = """
             function() {
                 var date = (this.story_date.getFullYear()) + "-" + (this.story_date.getMonth()+1);
-                emit(date, 1);
+                var hour = this.story_date.getHours();
+                var day = this.story_date.getDay();
+                emit(this.story_hash, {'month': date, 'hour': hour, 'day': day});
             }
         """
         reduce_f = """
             function(key, values) {
-                var total = 0;
-                for (var i=0; i < values.length; i++) {
-                    total += values[i];
-                }
-                return total;
+                return values;
             }
         """
-        dates = {}
-        res = MStory.objects(story_feed_id=self.pk).map_reduce(map_f, reduce_f, output='inline')
-        for r in res:
-            dates[r.key] = r.value
-            year = int(re.findall(r"(\d{4})-\d{1,2}", r.key)[0])
+        dates = defaultdict(int)
+        hours = defaultdict(int)
+        days = defaultdict(int)
+        results = MStory.objects(story_feed_id=self.pk).map_reduce(map_f, reduce_f, output='inline')
+        for result in results:
+            dates[result.value['month']] += 1
+            hours[int(result.value['hour'])] += 1
+            days[int(result.value['day'])] += 1
+            year = int(re.findall(r"(\d{4})-\d{1,2}", result.value['month'])[0])
             if year < min_year and year > 2000:
                 min_year = year
-                
+        
         # Add on to existing months, always amending up, never down. (Current month
         # is guaranteed to be accurate, since trim_feeds won't delete it until after
         # a month. Hacker News can have 1,000+ and still be counted.)
@@ -725,7 +729,7 @@ class Feed(models.Model):
                         months.append((key, dates.get(key, 0)))
                         total += dates.get(key, 0)
                         month_count += 1
-        self.data.story_count_history = json.encode(months)
+        self.data.story_count_history = json.encode({'months': months, 'hours': hours, 'days': days})
         self.data.save()
         if not total or not month_count:
             self.average_stories_per_month = 0
